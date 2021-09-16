@@ -1,8 +1,8 @@
 # coding=utf-8
 
 from __future__ import division
-import time
 import struct
+import time
 
 
 class ProtocolCode(object):
@@ -133,12 +133,12 @@ class DataProcessor(object):
             return []
 
         data = bytearray(data)
-        data_len = len(data)
+        body_len = 0
         # Get valid header: 0xfe0xfe
-        for idx in range(data_len - 1):
+        for idx in range(len(data) - 2):
             if self._is_frame_header(data, idx):
-                data_len = data[idx + 2] - 2
-                if data_len > 0:
+                body_len = data[idx + 2] - 2
+                if body_len > 0:
                     break
         else:
             return []
@@ -148,20 +148,22 @@ class DataProcessor(object):
         if cmd_id != genre:
             return []
         data_pos = idx + 4
-        valid_data = data[data_pos: data_pos + data_len]
+        body = data[data_pos:(data_pos + body_len)]
+
+        # check the footer: 0xfa
 
         # process valid data
         res = []
-        if data_len == 12 or data_len == 8:
-            for idx in range(0, len(valid_data), 2):
-                one = valid_data[idx: idx + 2]
+        if body_len == 12 or body_len == 8:
+            for idx in range(0, len(body), 2):
+                one = body[idx: idx + 2]
                 res.append(self._decode_int16(one))
-        elif data_len == 2:
+        elif body_len == 2:
             if genre in [ProtocolCode.IS_SERVO_ENABLE]:
-                return [self._decode_int8(valid_data[1:2])]
-            res.append(self._decode_int16(valid_data))
+                return [self._decode_int8(body[1:2])]
+            res.append(self._decode_int16(body))
         else:
-            res.append(self._decode_int8(valid_data))
+            res.append(self._decode_int8(body))
         return res
 
     def _process_single(self, data):
@@ -171,27 +173,44 @@ class DataProcessor(object):
 def write(self, command):
     self.log.debug("_write: {}".format(command))
     self._serial_port.write(command)
-    self._serial_port.flush()
+    # Default Windows flush is really inefficient: it sleeps for 0.05s.
+    #self._serial_port.flush()
+    while self._serial_port.out_waiting:
+        time.sleep(0.005)
 
+# Aggressively pre-read the mystery messages so that we get straight to the real message.
+# NOTE: this only works with an efficient transponder on the Basic, like SimpleTransponder.
+FAST_READ = False
+FAST_READ_SIZE = 96
 
 def read(self):
+    if FAST_READ: 
+        self._serial_port.read(FAST_READ_SIZE)
+    mystery_size = 0
     while True:
-        header = self._serial_port.read(2)
-        if (len(header) == 2) and (header[0] == 0xFF) and (header[1] == 0xFF):
-            # Read the undocumented messages that precede every read.
-            self.log.debug(f"_read: mystery header {header}")
-            instruction = self._serial_port.read(1)
+        header = self._serial_port.read(3)
+        if (len(header) == 3) and (header[0] == 0xFF) and (header[1] == 0xFF):
+            # Read the undocumented messages that precede every read. They have the format:
+            # Header: 0xFF 0xFF
+            # Instruction?: 0xXX
+            # Length: 0xXX
+            # Body: (Length bytes)
+#            self.log.debug(f"_read: mystery header {header}")
             length = self._serial_port.read(1)
-            self.log.debug(f"_read: mystery instruction {instruction[0]} length {length[0]}")
+#            self.log.debug(f"_read: mystery instruction {header[2]} length {length[0]}")
             body = self._serial_port.read(length[0])
-            self.log.debug(f"_read: mystery body {body}")
-        elif (len(header) == 2) and (header[0] == ProtocolCode.HEADER) and (header[1] == ProtocolCode.HEADER):
+#            self.log.debug(f"_read: mystery body {body}")
+            mystery_size += 3 * length[0]
+        elif (len(header) == 3) and (header[0] == ProtocolCode.HEADER) and (header[1] == ProtocolCode.HEADER):
+            self.log.debug(f"_read: mystery_size={mystery_size}")
             # Read the actual messages we want.
-            length = self._serial_port.read(1)
-            body = self._serial_port.read(length[0])
-            if len(body) < length[0]:
+            length = header[2]
+            body = self._serial_port.read(length)
+            if len(body) < length:
                 self.log.debug("_read: could not read body")
                 return None
-            data = header + length + body
+            data = header + body
             self.log.debug("_read: {}".format(data))
             return data
+        else:
+            self.log.error(f"_read: bad header {header}")
